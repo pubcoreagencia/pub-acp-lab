@@ -1,6 +1,6 @@
-# PUB-ACP-BIDGE
+# PUB-ACP-BRIDGE
 
-Ponte de transporte autônoma e programática conectando Clientes Orquestradores (como instâncias GPT, backends ou scripts) ao **Google Antigravity CLI (`gy`)** através do protocolo padronizado **ACP (Agent Client Protocol)**, sem intervenção humana e sem copy/paste.
+Ponte de transporte autônoma e programática conectando Clientes Orquestradores (como instâncias GPT, backends ou scripts) ao **Google Antigravity CLI (`agy`)** através do protocolo padronizado **ACP (Agent Client Protocol)**, sem intervenção humana e sem copy/paste.
 
 ---
 
@@ -16,7 +16,7 @@ Ponte de transporte autônoma e programática conectando Clientes Orquestradores
                      ou API PubAcpBridge
                               v
 +-------------------------------------------------------------+
-|                       PUB-ACP-BIDGE                       |
+|                       PUB-ACP-BRIDGE                       |
 |
         (bridge.js / server.js - Gerenciador de Sessões)     |
 +-------------------------------------------------------------+
@@ -66,44 +66,44 @@ Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdo
 ### 3.1. Mensagens de Entrada (Orquestrador -> Bridge)
 
 #### Criar Sessão:
-```jason
-{"id": 1, "action": "create_session", "cwd": "C:\\\\caminho\\\\do\\\\ workspace"}
+```json
+{"id": 1, "action": "create_session", "cwd": "C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC"}
 ```
 
 #### Enviar Prompt (com streaming):
-```jason
+```json
 {"id": 2, "action": "prompt", "sessionId": "UUID-DA-SESSAO", "prompt": "Leia o arquivo index.js"}
 ```
 
 #### Fechar Bridge:
-```jason
+```json
 {"id": 3, "action": "close"}
 ```
 
-### 3.2. Mensagens de Saíza (Bridge -> Orquestrador)
+### 3.2. Mensagens de Saída (Bridge -> Orquestrador)
 
 #### Inicialização / Pronto:
-```jason
-{"type": "ready", "status": "OK", "protocol": "PUB-ACP-BIDGE/1.0"}
+```json
+{"type": "ready", "status": "OK", "protocol": "PUB-ACP-BRIDGE/1.0"}
 ```
 
 #### Confirmação de Sessão:
-```jason
+```json
 {"id": 1, "type": "session_created", "sessionId": "3063f523-72b8-4f26-9626-8bb6fc212637"}
 ```
 
 #### Chunks de Streaming (em tempo real):
-```jason
+```json
 {"id": 2, "type": "chunk", "sessionId": "...", "chunk": "O arquivo contém..."}
 ```
 
 #### Notificação de Tool Call do Agente:
-```jason
+```json
 {"id": 2, "type": "tool_call", "sessionId": "...", "title": "view_file", "toolInput": {"AbsolutePath": "..."}}
 ```
 
 #### Conclusão do Turno:
-```jason
+```json
 {"id": 2, "type": "prompt_result", "sessionId": "...", "stopReason": "end_turn", "response": "..."}
 ```
 
@@ -137,7 +137,7 @@ async function main() {
   // 4. Segundo turno (MESMA sessão): Escrita mantendo contexto
   const r2 = await bridge.prompt(
     sessionId,
-    'Altere hello.txt para BRIDGE_OK'
+    'Altere hello.txt para BRIDGE_SESSION_OK'
   );
 
   // 5. Encerramento limpo
@@ -152,15 +152,15 @@ main();
 
 O bridge possui tratamento estruturado para:
 * **Processo AGY ou Adapter inexistente**: Rejeita imediatamente na inicialização com mensagem explícita.
-* **Timeouts**: Cada chamada JSON-PC possui temporizador configurável (padrão: 240s) para evitar travamentos.
+* **Timeouts**: Cada chamada JSON-RPC possui temporizador configurável (padrão: 240s) para evitar travamentos.
 * **JSON Inválido**: Capturado sem derrubar o processo, emitindo evento de erro estruturado.
-* **Queda do processo**: Se o processo sofrer crash, todas as requisições pendentes sÃo rejeitadas.
+* **Queda do processo**: Se o processo sofrer crash, todas as requisições pendentes são rejeitadas.
 * **Sessão inexistente**: Validação prévia imediata antes de enviar comandos à CLI.
 
 ---
 
 ## 6. Segurança e Permissões
 
-* **Permissões Scoped**: O CLI `agy` possui configuração registrada em `~/.gemini/antigravity-cli/settings.jsom` com escopo restrito ao workspace `PUB-ACP-POC`.
+* **Permissões Scoped**: O CLI `agy` possui configuração registrada em `~/.gemini/antigravity-cli/settings.json` com escopo restrito ao workspace `PUB-ACP-POC`.
 * **Modo Headless no Windows**: O adapter `agy-agent-acp` executa a flag `--dangerously-skip-permissions` estritamente no subprocesso para permitir autonomia do agente Antigravity na execução de ferramentas sem requerer prompts interativos de TTY.
-* **Isolamento Total**: Toda a operação está confinada ao diretório do POC. Nenhum arquivo ou reposítorio da PUB (PDL, PUB, Neural, PP, PUB Ecom) foi acessado ou afetado.
+* **Isolamento Total**: Toda a operação está confinada ao diretório do POC. Nenhum arquivo ou repositório da PUB (PDL, PUB Neural, PP, PUB Ecom) foi acessado ou afetado.
