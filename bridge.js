@@ -11,6 +11,7 @@ class PubAcpBridge extends EventEmitter {
     this.agyBin = options.agyBin || 'C:\\\\Users\\\\Matheus Paes\\\\AppData\\\\Local\\\\agy\\\\bin\\\\agy.exe';
     this.adapterDistPath = options.adapterDistPath || path.resolve(this.workspaceDir, 'agy-agent-acp', 'dist', 'index.js');
     this.timeoutMs = options.timeoutMs || 240000;
+    this.skipPermissions = options.skipPermissions !== undefined ? options.skipPermissions : false;
     this.child = null;
     this.rl = null;
     this.reqId = 1;
@@ -30,7 +31,8 @@ class PubAcpBridge extends EventEmitter {
 
       const env = {
         ...process.env,
-        PATH: path.dirname(this.agyBin) + ';' + (process.env.PATH || '')
+        PATH: path.dirname(this.agyBin) + ';' + (process.env.PATH || ''),
+        AGY_SKIP_PERMISSIONS: this.skipPermissions ? 'true' : 'false'
       };
 
       this.child = spawn(process.execPath, [this.adapterDistPath], {

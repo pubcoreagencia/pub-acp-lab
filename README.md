@@ -117,7 +117,8 @@ const { PubAcpBridge } = require('./bridge.js');
 async function main() {
   const bridge = new PubAcpBridge({
     workspaceDir: process.cwd(),
-    timeoutMs: 180000
+    timeoutMs: 180000,
+    skipPermissions: false // Modo seguro/scoped ativo por padrão
   });
 
   // 1. Inicia o adaptador e realiza handshake ACP
@@ -159,8 +160,29 @@ O bridge possui tratamento estruturado para:
 
 ---
 
-## 6. Segurança e Permissões
+## 6. Segurança e Permissões Scoped
 
-* **Permissões Scoped**: O CLI `agy` possui configuração registrada em `~/.gemini/antigravity-cli/settings.json` com escopo restrito ao workspace `PUB-ACP-POC`.
-* **Modo Headless no Windows**: O adapter `agy-agent-acp` executa a flag `--dangerously-skip-permissions` estritamente no subprocesso para permitir autonomia do agente Antigravity na execução de ferramentas sem requerer prompts interativos de TTY.
+* **Execução Autônoma Scoped**: A partir da versão `v0.2.0`, a flag `--dangerously-skip-permissions` não é mais necessária nem utilizada por padrão.
+* **Permissões Granulares em `settings.json`**: O Antigravity CLI é configurado em `~/.gemini/antigravity-cli/settings.json` com regras granulares restritas ao diretório do workspace e comandos específicos:
+  ```json
+  {
+    "permissions": {
+      "allow": [
+        "read_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\**)",
+        "read_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/**)",
+        "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\**)",
+        "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/**)",
+        "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\hello.txt)",
+        "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/hello.txt)",
+        "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\calc.js)",
+        "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/calc.js)",
+        "command(node -v)",
+        "command(node calc.js)",
+        "command(node -e \"console.log(require('./calc.js').multiply(2, 3))\")",
+        "command(node -e \"const { multiply } = require('./calc.js'); console.log(multiply(2, 3));\")"
+      ]
+    }
+  }
+  ```
+* **Bloqueio Automático Fora do Escopo**: Comandos não autorizados (ex.: `whoami`) ou tentativas de leitura fora do workspace (ex.: `C:\Windows\System32\drivers\etc\hosts`) são automaticamente bloqueados e negados pelo motor de permissões do Antigravity CLI no modo headless.
 * **Isolamento Total**: Toda a operação está confinada ao diretório do POC. Nenhum arquivo ou repositório da PUB (PDL, PUB Neural, PP, PUB Ecom) foi acessado ou afetado.
