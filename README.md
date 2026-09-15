@@ -238,3 +238,14 @@ O bridge possui tratamento estruturado para:
 > [!IMPORTANT]
 > **O POC comprova o transporte programático bidirecional e autônomo entre um cliente externo local e o Antigravity CLI.**
 > Isso não significa que uma conversa comum na interface web do ChatGPT Free possa automaticamente abrir uma conexão direta com o `localhost` da máquina do usuário, pois o ambiente web de navegadores não tem acesso direto a processos locais sem um agente intermediário local, daemon ponte ou túnel seguro autorizado.
+
+---
+
+## 9. Fase 6 — ChatGPT Free Browser Bridge (`src/browser-adapter/`)
+
+Implementação da camada que conecta uma aba aberta no **ChatGPT Free no Chrome** diretamente ao **PUB-ACP-BRIDGE** e ao **AGY**:
+
+* **Servidor Local SSE & HTTP** (`src/browser-adapter/bridge-server.js`): Roda em `127.0.0.1:5000` recebendo conexão da extensão e orquestrando jobs de prompt.
+* **Cliente de Extensão** (`src/browser-adapter/browser-client.js`): Protocolo SSE e HTTP para streaming de chunks e respostas.
+* **Orquestrador Fim-a-Fim** (`src/browser-adapter/browser-orchestrator.js`): Liga o fluxo `ChatGPT Free -> Browser Extension -> Localhost -> ACP -> AGY -> ChatGPT Free` sem qualquer intervenção humana ou copy/paste.
+* **Validação Completa**: Documentada em [`PHASE_6_CHATGPT_BROWSER.md`](./PHASE_6_CHATGPT_BROWSER.md).
