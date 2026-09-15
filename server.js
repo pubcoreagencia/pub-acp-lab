@@ -40,40 +40,56 @@ const { PubAcpBridge } = require('./bridge.js');
     try {
       if (action === 'create_session') {
         const sid = await bridge.createSession(cwd);
-        sendOut({ id, type: 'session_created', sessionId: sid });
+        sendOut({ id, request_id: id, type: 'session_created', sessionId: sid, session_id: sid });
       } else if (action === 'prompt') {
         if (!sessionId || !promptText) {
-          sendOut({ id, type: 'error', error: 'MISSING_PARAMS', message: 'sessionId and prompt are required' });
+          sendOut({ id, request_id: id, type: 'error', error: 'MISSING_PARAMS', message: 'sessionId and prompt are required' });
           return;
         }
+
+        sendOut({ id, request_id: id, type: 'request_started', sessionId, session_id: sessionId });
 
         const res = await bridge.prompt(
           sessionId,
           promptText,
           (chunk) => {
-            sendOut({ id, type: 'chunk ', sessionId, chunk });
+            sendOut({ id, request_id: id, type: 'chunk', sessionId, session_id: sessionId, chunk });
           },
           (title, toolInput) => {
-            sendOut({ id, type: 'tool_call', sessionId, title, toolInput });
+            sendOut({ id, request_id: id, type: 'tool_call', sessionId, session_id: sessionId, title, toolInput });
+          },
+          (usage) => {
+            sendOut({ id, request_id: id, type: 'usage_update', sessionId, session_id: sessionId, usage });
           }
         );
 
         sendOut({
           id,
+          request_id: id,
           type: 'prompt_result',
           sessionId,
+          session_id: sessionId,
           stopReason: res.stopReason,
           response: res.response
         });
+
+        sendOut({
+          id,
+          request_id: id,
+          type: 'request_finished',
+          sessionId,
+          session_id: sessionId,
+          stopReason: res.stopReason
+        });
       } else if (action === 'close') {
         await bridge.close();
-        sendOut({ id, type: 'closed' });
+        sendOut({ id, request_id: id, type: 'closed' });
         process.exit(0);
       } else {
-        sendOut({ id, type: 'error', error: 'UNKNOWN_ACTION', action });
+        sendOut({ id, request_id: id, type: 'error', error: 'UNKNOWN_ACTION', action });
       }
     } catch (err) {
-      sendOut({ id, type: 'action_error', error: err.message });
+      sendOut({ id, request_id: id, type: 'action_error', error: err.message });
     }
   });
 

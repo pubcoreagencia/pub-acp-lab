@@ -59,9 +59,9 @@ Ponte de transporte autônoma e programática conectando Clientes Orquestradores
 
 ---
 
-## 3. Protocolo de Entrada e Saída (server.js)
+## 3. Protocolo de Entrada e Saída (server.js) — Contrato do Orquestrador
 
-Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdout`.
+Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdout` para clientes desacoplados e orquestradores externos.
 
 ### 3.1. Mensagens de Entrada (Orquestrador -> Bridge)
 
@@ -70,7 +70,7 @@ Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdo
 {"id": 1, "action": "create_session", "cwd": "C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC"}
 ```
 
-#### Enviar Prompt (com streaming):
+#### Enviar Prompt (com streaming e correlação):
 ```json
 {"id": 2, "action": "prompt", "sessionId": "UUID-DA-SESSAO", "prompt": "Leia o arquivo index.js"}
 ```
@@ -82,29 +82,51 @@ Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdo
 
 ### 3.2. Mensagens de Saída (Bridge -> Orquestrador)
 
+Todas as mensagens emitidas incluem correlação com `id` / `request_id` e `sessionId` / `session_id`.
+
 #### Inicialização / Pronto:
 ```json
 {"type": "ready", "status": "OK", "protocol": "PUB-ACP-BRIDGE/1.0"}
 ```
 
-#### Confirmação de Sessão:
+#### Confirmação de Sessão Criada:
 ```json
-{"id": 1, "type": "session_created", "sessionId": "3063f523-72b8-4f26-9626-8bb6fc212637"}
+{"id": 1, "request_id": 1, "type": "session_created", "sessionId": "3063f523-72b8-4f26-9626-8bb6fc212637", "session_id": "3063f523-72b8-4f26-9626-8bb6fc212637"}
+```
+
+#### Início da Execução do Request:
+```json
+{"id": 2, "request_id": 2, "type": "request_started", "sessionId": "...", "session_id": "..."}
 ```
 
 #### Chunks de Streaming (em tempo real):
 ```json
-{"id": 2, "type": "chunk", "sessionId": "...", "chunk": "O arquivo contém..."}
+{"id": 2, "request_id": 2, "type": "chunk", "sessionId": "...", "session_id": "...", "chunk": "O arquivo contém..."}
 ```
 
 #### Notificação de Tool Call do Agente:
 ```json
-{"id": 2, "type": "tool_call", "sessionId": "...", "title": "view_file", "toolInput": {"AbsolutePath": "..."}}
+{"id": 2, "request_id": 2, "type": "tool_call", "sessionId": "...", "session_id": "...", "title": "view_file", "toolInput": {"AbsolutePath": "..."}}
+```
+
+#### Atualização de Consumo de Tokens:
+```json
+{"id": 2, "request_id": 2, "type": "usage_update", "sessionId": "...", "session_id": "...", "usage": {"inputTokens": 14000, "outputTokens": 300, "totalTokens": 14300}}
 ```
 
 #### Conclusão do Turno:
 ```json
-{"id": 2, "type": "prompt_result", "sessionId": "...", "stopReason": "end_turn", "response": "..."}
+{"id": 2, "request_id": 2, "type": "prompt_result", "sessionId": "...", "session_id": "...", "stopReason": "end_turn", "response": "..."}
+```
+
+#### Fim do Ciclo de Vida do Request:
+```json
+{"id": 2, "request_id": 2, "type": "request_finished", "sessionId": "...", "session_id": "...", "stopReason": "end_turn"}
+```
+
+#### Encerramento Gracioso:
+```json
+{"id": 3, "request_id": 3, "type": "closed"}
 ```
 
 ---
@@ -132,7 +154,8 @@ async function main() {
     sessionId,
     'Leia hello.txt',
     (chunk) => process.stdout.write(chunk),
-    (tool, params) => console.log('Tool acionada:', tool)
+    (tool, params) => console.log('Tool acionada:', tool),
+    (usage) => console.log('Tokens consumidos:', usage.totalTokens)
   );
 
   // 4. Segundo turno (MESMA sessão): Escrita mantendo contexto
@@ -149,7 +172,26 @@ main();
 
 ---
 
-## 5. Tratamento de Erros e Resiliência
+## 5. Simulador de Orquestrador Externo (`orchestrator-sim.js`)
+
+O projeto inclui um cliente de teste que simula um **Orquestrador Externo** (como uma instância do GPT ou backend) atuando como um processo desacoplado:
+
+* **Isolamento de Processo**: Não invoca métodos internos do `bridge.js`; executa `server.js` como um subprocesso filho e comunica-se exclusivamente por streaming NDJSON via `stdin` e `stdout`.
+* **Correlação Bidirecional**: Associa cada requisição (`request_id`) e sessão (`session_id`) às respostas e notificações assíncronas do agente.
+* **Validação Multi-Turn**:
+  * **Turno 1**: Gera um identificador único randômico em memória, envia uma tarefa para gravá-lo no arquivo `token.txt` no workspace e aguarda confirmação com streaming em tempo real.
+  * **Turno 2**: Na mesma sessão persistente, solicita a leitura de `token.txt` e valida que o Antigravity preservou o estado e devolveu com sucesso o identificador correto.
+* **Teste de Segurança & Erro**: Tenta leitura fora do escopo (`hosts`), verificando que o motor do `agy` auto-nega a operação e o erro é transmitido de forma estruturada sem travamentos.
+* **Graceful Shutdown**: Envia o comando `close` e encerra a conexão de forma limpa.
+
+Para rodar a simulação:
+```powershell
+node orchestrator-sim.js
+```
+
+---
+
+## 6. Tratamento de Erros e Resiliência
 
 O bridge possui tratamento estruturado para:
 * **Processo AGY ou Adapter inexistente**: Rejeita imediatamente na inicialização com mensagem explícita.
@@ -160,7 +202,7 @@ O bridge possui tratamento estruturado para:
 
 ---
 
-## 6. Segurança e Permissões Scoped
+## 7. Segurança e Permissões Scoped
 
 * **Execução Autônoma Scoped**: A partir da versão `v0.2.0`, a flag `--dangerously-skip-permissions` não é mais necessária nem utilizada por padrão.
 * **Permissões Granulares em `settings.json`**: O Antigravity CLI é configurado em `~/.gemini/antigravity-cli/settings.json` com regras granulares restritas ao diretório do workspace e comandos específicos:
@@ -174,6 +216,8 @@ O bridge possui tratamento estruturado para:
         "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/**)",
         "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\hello.txt)",
         "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/hello.txt)",
+        "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\token.txt)",
+        "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/token.txt)",
         "write_file(C:\\\\Users\\\\Matheus Paes\\\\Documents\\\\ChatGPT\\\\PUB-ACP-POC\\\\calc.js)",
         "write_file(C:/Users/Matheus Paes/Documents/ChatGPT/PUB-ACP-POC/calc.js)",
         "command(node -v)",
@@ -186,3 +230,11 @@ O bridge possui tratamento estruturado para:
   ```
 * **Bloqueio Automático Fora do Escopo**: Comandos não autorizados (ex.: `whoami`) ou tentativas de leitura fora do workspace (ex.: `C:\Windows\System32\drivers\etc\hosts`) são automaticamente bloqueados e negados pelo motor de permissões do Antigravity CLI no modo headless.
 * **Isolamento Total**: Toda a operação está confinada ao diretório do POC. Nenhum arquivo ou repositório da PUB (PDL, PUB Neural, PP, PUB Ecom) foi acessado ou afetado.
+
+---
+
+## 8. Limitação Atual (Platform Integration Blocker)
+
+> [!IMPORTANT]
+> **O POC comprova o transporte programático bidirecional e autônomo entre um cliente externo local e o Antigravity CLI.**
+> Isso não significa que uma conversa comum na interface web do ChatGPT Free possa automaticamente abrir uma conexão direta com o `localhost` da máquina do usuário, pois o ambiente web de navegadores não tem acesso direto a processos locais sem um agente intermediário local, daemon ponte ou túnel seguro autorizado.

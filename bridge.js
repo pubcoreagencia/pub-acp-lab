@@ -160,15 +160,15 @@ class PubAcpBridge extends EventEmitter {
     return res.sessionId;
   }
 
-  async prompt(sessionId, text, onChunk, onTool) {
+  async prompt(sessionId, text, onChunk, onTool, onUsage) {
     if (!this.sessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} does not exist`);
     }
 
-    let chunkHandler, toolHandler;
+    let chunkHandler, toolHandler, usageHandler;
     let fullResponse = '';
 
-    if (onChunk || onTool) {
+    if (onChunk || onTool || onUsage) {
       chunkHandler = (data) => {
         if (data.sessionId === sessionId) {
           fullResponse += data.text;
@@ -180,8 +180,14 @@ class PubAcpBridge extends EventEmitter {
           onTool(data.title, data.toolInput);
         }
       };
-      this.on('chunk', chunkHandler);
-      this.on('tool_call', toolHandler);
+      usageHandler = (data) => {
+        if (data.sessionId === sessionId && onUsage) {
+          onUsage(data.usage);
+        }
+      };
+      if (onChunk) this.on('chunk', chunkHandler);
+      if (onTool) this.on('tool_call', toolHandler);
+      if (onUsage) this.on('usage', usageHandler);
     }
 
     try {
@@ -198,6 +204,7 @@ class PubAcpBridge extends EventEmitter {
     } finally {
       if (chunkHandler) this.off('chunk', chunkHandler);
       if (toolHandler) this.off('tool_call', toolHandler);
+      if (usageHandler) this.off('usage', usageHandler);
     }
   }
 
