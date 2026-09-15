@@ -1,0 +1,166 @@
+# PUB-ACP-BIDGE
+
+Ponte de transporte autônoma e programática conectando Clientes Orquestradores (como instâncias GPT, backends ou scripts) ao **Google Antigravity CLI (`gy`)** através do protocolo padronizado **ACP (Agent Client Protocol)**, sem intervenção humana e sem copy/paste.
+
+---
+
+## 1. Arquitetura
+
+```text
++-------------------------------------------------------------+
+|                     CLIENTE ORQUESTRADOR                    |
+|             (Node.js / Python / Backend / API)              |
++-------------------------------------------------------------+
+                              |
+                    JSON-RPC / NDJSON
+                     ou API PubAcpBridge
+                              v
++-------------------------------------------------------------+
+|                       PUB-ACP-BIDGE                       |
+|
+        (bridge.js / server.js - Gerenciador de Sessões)     |
++-------------------------------------------------------------+
+                              |
+                       ACP Protocol v2
+                       (stdio JSON-RPC)
+                              v
++-------------------------------------------------------------+
+|                        ADAPTER ACP                        |
+|
+             (agy-agent-acp / dongitran @ a314a06)           |
++-------------------------------------------------------------+
+                              |
+                    NDJSON bidirecional stdio
+                    --input-format stream-json
+                    --output-format stream-json
+                              v
++-------------------------------------------------------------+
+|                   ANTIGRAVITY CLI (agy.exe)                 |
+|
+             Processo persistente / Agente IA              |
++-------------------------------------------------------------+
+                              |
+                      Tool Calls nativos
+                      (view_file, replace, run)
+                              v
++-------------------------------------------------------------+
+|                    FILESYSTEM DO WORKSPACE                 |
+|                 (C\:\\...\\PUB-ACP-POC)                    |
++-------------------------------------------------------------+
+```
+
+---
+
+## 2. Componentes
+
+1. `bridge.js`: Módulo central reutilizável (`PubAcpBridge`) que gerencia o ciclo de vida do processo ACP, executa o handshake `initialize`, cria sessões (`session/new`), despacha prompts (`session/prompt`), mapeia eventos em tempo real (`chunk`, `tool_call`, `usage`) e garante encerramento gracioso com timeouts e tratamento de erros estruturados.
+2. `server.js`: Interface CLI em NDJSON sobre stdin/stdout para permitir consumo por orquestradores desacoplados de qualquer linguagem.
+3. `test-suite.js`: Suíte de testes automatizada validando todos os turnos de leitura, escrita, contexto na mesma sessão, correção de bugs em código e resiliência a falhas.
+
+---
+
+## 3. Protocolo de Entrada e Saída (server.js)
+
+Comunicação via **NDJSON** (uma linha JSON por mensagem) sobre `stdin` e `stdout`.
+
+### 3.1. Mensagens de Entrada (Orquestrador -> Bridge)
+
+#### Criar Sessão:
+```jason
+{"id": 1, "action": "create_session", "cwd": "C:\\\\caminho\\\\do\\\\ workspace"}
+```
+
+#### Enviar Prompt (com streaming):
+```jason
+{"id": 2, "action": "prompt", "sessionId": "UUID-DA-SESSAO", "prompt": "Leia o arquivo index.js"}
+```
+
+#### Fechar Bridge:
+```jason
+{"id": 3, "action": "close"}
+```
+
+### 3.2. Mensagens de Saíza (Bridge -> Orquestrador)
+
+#### Inicialização / Pronto:
+```jason
+{"type": "ready", "status": "OK", "protocol": "PUB-ACP-BIDGE/1.0"}
+```
+
+#### Confirmação de Sessão:
+```jason
+{"id": 1, "type": "session_created", "sessionId": "3063f523-72b8-4f26-9626-8bb6fc212637"}
+```
+
+#### Chunks de Streaming (em tempo real):
+```jason
+{"id": 2, "type": "chunk", "sessionId": "...", "chunk": "O arquivo contém..."}
+```
+
+#### Notificação de Tool Call do Agente:
+```jason
+{"id": 2, "type": "tool_call", "sessionId": "...", "title": "view_file", "toolInput": {"AbsolutePath": "..."}}
+```
+
+#### Conclusão do Turno:
+```jason
+{"id": 2, "type": "prompt_result", "sessionId": "...", "stopReason": "end_turn", "response": "..."}
+```
+
+---
+
+## 4. Uso Programático em Node.js (bridge.js)
+
+```javascript
+const { PubAcpBridge } = require('./bridge.js');
+
+async function main() {
+  const bridge = new PubAcpBridge({
+    workspaceDir: process.cwd(),
+    timeoutMs: 180000
+  });
+
+  // 1. Inicia o adaptador e realiza handshake ACP
+  await bridge.start();
+
+  // 2. Cria sessão persistente
+  const sessionId = await bridge.createSession();
+
+  // 3. Primeiro turno: Leitura
+  const r1 = await bridge.prompt(
+    sessionId,
+    'Leia hello.txt',
+    (chunk) => process.stdout.write(chunk),
+    (tool, params) => console.log('Tool acionada:', tool)
+  );
+
+  // 4. Segundo turno (MESMA sessão): Escrita mantendo contexto
+  const r2 = await bridge.prompt(
+    sessionId,
+    'Altere hello.txt para BRIDGE_OK'
+  );
+
+  // 5. Encerramento limpo
+  await bridge.close();
+}
+main();
+```
+
+---
+
+## 5. Tratamento de Erros e Resiliência
+
+O bridge possui tratamento estruturado para:
+* **Processo AGY ou Adapter inexistente**: Rejeita imediatamente na inicialização com mensagem explícita.
+* **Timeouts**: Cada chamada JSON-PC possui temporizador configurável (padrão: 240s) para evitar travamentos.
+* **JSON Inválido**: Capturado sem derrubar o processo, emitindo evento de erro estruturado.
+* **Queda do processo**: Se o processo sofrer crash, todas as requisições pendentes sÃo rejeitadas.
+* **Sessão inexistente**: Validação prévia imediata antes de enviar comandos à CLI.
+
+---
+
+## 6. Segurança e Permissões
+
+* **Permissões Scoped**: O CLI `agy` possui configuração registrada em `~/.gemini/antigravity-cli/settings.jsom` com escopo restrito ao workspace `PUB-ACP-POC`.
+* **Modo Headless no Windows**: O adapter `agy-agent-acp` executa a flag `--dangerously-skip-permissions` estritamente no subprocesso para permitir autonomia do agente Antigravity na execução de ferramentas sem requerer prompts interativos de TTY.
+* **Isolamento Total**: Toda a operação está confinada ao diretório do POC. Nenhum arquivo ou reposítorio da PUB (PDL, PUB, Neural, PP, PUB Ecom) foi acessado ou afetado.
