@@ -227,6 +227,25 @@ class ChatGptDriver {
         stableTextSamples = 0;
       }
 
+      // STALL RECOVERY: If a new turn was created, stop button is gone, but streaming pulse remains empty for > 15s,
+      // ChatGPT Free backend has finalized server-side but React UI stream stalled. Reloading page retrieves full turn.
+      if (state && state.count > beforeCount && !state.hasStopButton && (!state.text || state.text.length === 0) && (Date.now() - start > 15000)) {
+        try {
+          await this.cdp.send('Page.reload');
+          await new Promise(r => setTimeout(r, 4000));
+          const reloadedText = await this.cdp.eval(`
+            (function() {
+              const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+              const last = nodes[nodes.length - 1];
+              return last ? (last.innerText || '').trim() : '';
+            })()
+          `);
+          if (reloadedText && reloadedText.length > 0) {
+            return reloadedText;
+          }
+        } catch {}
+      }
+
       await new Promise(r => setTimeout(r, 600));
     }
 
