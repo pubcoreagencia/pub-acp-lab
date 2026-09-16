@@ -1,14 +1,15 @@
-const http = require('http');
+﻿const http = require('http');
 const { ChatGptTransportAdapter, ErrorCodes } = require('./transport-adapter.js');
 
 /**
- * ChatGptTransportServer:
+ * ChatGptTransportServer (Phase 7.3):
  * Exposes ChatGptTransportAdapter over a localhost-only HTTP JSON endpoint.
  *
  * Supported Endpoints:
  * - POST /v1/chat/completions (Standard RPC format)
  * - POST /v1/transport/prompt
  * - GET  /v1/health
+ * - GET  /v1/diagnostics
  */
 class ChatGptTransportServer {
   constructor(options = {}) {
@@ -46,13 +47,22 @@ class ChatGptTransportServer {
         const url = new URL(req.url, `http://${this.host}:${this.port}`);
 
         if (req.method === 'GET' && url.pathname === '/v1/health') {
+          const diagnostics = await this.adapter.getDiagnostics();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            status: 'ok',
+            status: diagnostics.status,
             initialized: this.adapter.isInitialized,
             isProcessing: this.adapter.isProcessing,
-            sessionsCount: this.adapter.sessions.size
+            sessionsCount: this.adapter.sessions.size,
+            health: diagnostics.health
           }));
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/v1/diagnostics') {
+          const diagnostics = await this.adapter.getDiagnostics();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(diagnostics));
           return;
         }
 

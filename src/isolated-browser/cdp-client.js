@@ -9,6 +9,8 @@ class CdpClient extends EventEmitter {
     this.socket = null;
     this.idCounter = 1;
     this.pending = new Map();
+    // Default no-op error handler to prevent unhandled EventEmitter throws on socket reset/closure
+    this.on('error', () => {});
   }
 
   async connect() {
