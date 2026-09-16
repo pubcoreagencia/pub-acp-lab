@@ -97,7 +97,16 @@ class IsolatedBrowserManager {
 
   async navigate(url) {
     await this.cdp.send('Page.navigate', { url });
+    if (this.pageTarget) {
+      this.pageTarget.url = url;
+    }
     await this.waitForPageLoad();
+    try {
+      const currentUrl = await this.cdp.eval('window.location.href');
+      if (currentUrl && this.pageTarget) {
+        this.pageTarget.url = currentUrl;
+      }
+    } catch {}
   }
 
   async waitForPageLoad(timeoutMs = 25000) {
