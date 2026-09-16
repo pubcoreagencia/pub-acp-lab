@@ -1,4 +1,4 @@
-﻿const { EventEmitter } = require('events');
+const { EventEmitter } = require('events');
 const path = require('path');
 const { IsolatedBrowserManager } = require('../isolated-browser/browser-manager.js');
 const { ChatGptDriver } = require('../isolated-browser/chatgpt-driver.js');
@@ -11,9 +11,9 @@ const { TransportObservability } = require('./observability.js');
 const { RecoveryManager } = require('./recovery-manager.js');
 
 /**
- * ChatGptTransportAdapter (Phase 7.3):
+ * ChatGptTransportAdapter (Phase 7.4):
  * Provides a reliable, observable, idempotent and auto-recovering local transport
- * to real ChatGPT Free via an isolated Chrome profile and native WebSocket CDP.
+ * to real ChatGPT Free with bounded re-entry, input safety and concurrency locking.
  */
 class ChatGptTransportAdapter extends EventEmitter {
   constructor(options = {}) {
@@ -27,10 +27,11 @@ class ChatGptTransportAdapter extends EventEmitter {
     this.driver = null;
     this.isInitialized = !!this.backend;
 
-    // Phase 7.3 Core Subsystems
+    // Session Management & Concurrency Lock
     this.sessions = new Map(); // sessionId -> SessionRecord
     this.activeSessionId = null;
     this.isProcessing = false;
+    this.activeRequestId = null; // Identifier of request currently holding the lock
     this.maxRetryAttempts = options.maxRetryAttempts !== undefined ? options.maxRetryAttempts : 2;
 
     this.idempotency = new IdempotencyManager();
@@ -38,10 +39,6 @@ class ChatGptTransportAdapter extends EventEmitter {
     this.recovery = new RecoveryManager(this);
   }
 
-  /**
-   * Initializes the browser manager, establishes CDP connection,
-   * verifies authentication, and ensures the window stays minimized.
-   */
   async initialize() {
     if (this.backend) {
       if (typeof this.backend.initialize === 'function') {
@@ -74,7 +71,6 @@ class ChatGptTransportAdapter extends EventEmitter {
 
       await this.browserManager.launch();
 
-      // If browser is already connected and authenticated, reuse directly
       const currentUrl = (this.browserManager && this.browserManager.pageTarget) ? this.browserManager.pageTarget.url : '';
       let auth = null;
       if (currentUrl.includes('chatgpt.com')) {
@@ -121,25 +117,46 @@ class ChatGptTransportAdapter extends EventEmitter {
   }
 
   /**
-   * Main programmatic dispatch method with Bounded Retry, Idempotency & Auto-Recovery.
+   * Main programmatic dispatch method.
+   * Hardened against null/invalid input, concurrency leaks and prompt duplication.
    */
-  async send(req = {}) {
+  async send(req) {
     const startTime = Date.now();
+
+    // 1. Strict Input Validation (P0)
+    if (!req || typeof req !== 'object' || Array.isArray(req)) {
+      return this._formatError(
+        `req-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        null,
+        ErrorCodes.INVALID_REQUEST,
+        'Request payload must be a non-null object'
+      );
+    }
+
     const requestId = req.request_id || req.requestId || `req-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     const timeoutMs = TimeoutPolicy.resolveTimeout(req.timeout_ms || req.timeoutMs || this.defaultTimeoutMs);
-
-    // 1. Validation
-    if (!req || typeof req !== 'object') {
-      return this._formatError(requestId, null, ErrorCodes.INVALID_REQUEST, 'Request payload must be an object');
-    }
-
     const promptText = req.prompt;
+
     if (!promptText || typeof promptText !== 'string' || !promptText.trim()) {
-      return this._formatError(requestId, null, ErrorCodes.INVALID_REQUEST, 'Prompt text is required and cannot be empty');
+      return this._formatError(
+        requestId,
+        req.session_id || req.sessionId || null,
+        ErrorCodes.INVALID_REQUEST,
+        'Prompt text is required and cannot be empty'
+      );
     }
 
-    // 2. Idempotency Check
-    const idempStatus = this.idempotency.check(requestId);
+    // 2. Idempotency & Payload Conflict Check (P1)
+    const idempStatus = this.idempotency.check(requestId, promptText);
+    if (idempStatus.conflict) {
+      return this._formatError(
+        requestId,
+        req.session_id || req.sessionId || null,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        `Request ID ${requestId} was already executed with a different payload`
+      );
+    }
+
     if (idempStatus.status === 'COMPLETED' && idempStatus.record) {
       this.observability.emitEvent('IDEMPOTENT_CACHE_HIT', {
         requestId,
@@ -153,165 +170,200 @@ class ChatGptTransportAdapter extends EventEmitter {
     if (idempStatus.status === 'IN_FLIGHT') {
       return this._formatError(
         requestId,
-        req.session_id || null,
+        req.session_id || req.sessionId || null,
         ErrorCodes.REQUEST_IN_FLIGHT,
         `Request ${requestId} is already currently executing in-flight.`
       );
     }
 
-    // Register in-flight idempotency
-    this.idempotency.registerInFlight(requestId, { prompt: promptText.slice(0, 50) });
-
-    // 3. Ensure transport is initialized
-    if (!this.isInitialized) {
-      try {
-        await this.initialize();
-      } catch (initErr) {
-        const errObj = this._formatError(requestId, null, initErr.code || ErrorCodes.BROWSER_UNAVAILABLE, initErr.message);
-        this.idempotency.registerFailed(requestId, initErr);
-        return errObj;
-      }
-    }
-
-    // 4. Concurrency check: prevent simultaneous prompts clashing
+    // 3. Concurrency Lock Check (P0)
     if (this.isProcessing) {
-      const errObj = this._formatError(
+      return this._formatError(
         requestId,
-        req.session_id || null,
+        req.session_id || req.sessionId || null,
         ErrorCodes.SESSION_BUSY,
-        `Transport is currently processing another request (${this.activeSessionId}). Concurrent execution is restricted for session safety.`
+        `Transport is currently processing another request (${this.activeSessionId || this.activeRequestId}). Concurrent execution is restricted for session safety.`
       );
-      this.idempotency.registerFailed(requestId, new TransportError(ErrorCodes.SESSION_BUSY, 'Transport is busy'));
-      return errObj;
     }
 
+    // Acquire lock exclusively for this requestId
     this.isProcessing = true;
-    let sessionId = req.session_id || req.sessionId;
-    let sessionRecord = null;
+    this.activeRequestId = requestId;
+    let lockAcquired = true;
 
-    // 5. Session Record Resolution & Lifecycle Transition
-    const isNewSession = !sessionId || !this.sessions.has(sessionId);
-    if (isNewSession) {
-      sessionId = sessionId || `session-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      sessionRecord = new SessionRecord(sessionId);
-      sessionRecord.transitionTo(SessionState.READY, 'created_ready');
-      this.sessions.set(sessionId, sessionRecord);
-    } else {
-      sessionRecord = this.sessions.get(sessionId);
-    }
+    try {
+      // Register in-flight idempotency with payload fingerprint
+      this.idempotency.registerInFlight(requestId, promptText, { prompt: promptText.slice(0, 50) });
 
-    this.activeSessionId = sessionId;
-    sessionRecord.markProcessing();
+      // Ensure transport is initialized
+      if (!this.isInitialized) {
+        try {
+          await this.initialize();
+        } catch (initErr) {
+          const errObj = this._formatError(requestId, null, initErr.code || ErrorCodes.BROWSER_UNAVAILABLE, initErr.message);
+          this.idempotency.registerFailed(requestId, initErr);
+          return errObj;
+        }
+      }
 
-    // 6. Bounded Execution Loop with Safe Retry
-    let attempt = 0;
-    let lastError = null;
+      let sessionId = req.session_id || req.sessionId;
+      let sessionRecord = null;
 
-    while (attempt < this.maxRetryAttempts) {
-      attempt++;
+      // Session Record Resolution & Lifecycle Transition
+      const isNewSession = !sessionId || !this.sessions.has(sessionId);
+      if (isNewSession) {
+        sessionId = sessionId || `session-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        sessionRecord = new SessionRecord(sessionId);
+        sessionRecord.transitionTo(SessionState.READY, 'created_ready');
+        this.sessions.set(sessionId, sessionRecord);
+      } else {
+        sessionRecord = this.sessions.get(sessionId);
+      }
 
-      this.observability.emitEvent('OPERATION_ATTEMPT', {
-        requestId,
-        sessionId,
-        attempt,
-        state: sessionRecord.state,
-        details: { isNewSession }
-      });
+      this.activeSessionId = sessionId;
+      sessionRecord.markProcessing();
 
-      try {
-        const result = await this._executePromptAttempt({
-          requestId,
-          sessionId,
-          promptText,
-          timeoutMs,
-          isNewSession,
-          sessionRecord,
-          attempt
-        });
+      // Bounded Execution Loop with Side-Effect Aware Re-Entry (P0)
+      let attempt = 0;
+      let lastError = null;
 
-        // Success! Mark ready and record idempotency
-        sessionRecord.markReady(true);
-        const durationMs = Date.now() - startTime;
+      while (attempt < this.maxRetryAttempts) {
+        attempt++;
 
-        const responseObj = {
-          request_id: requestId,
-          session_id: sessionId,
-          status: 'completed',
-          text: result,
-          metadata: {
-            turn: sessionRecord.turnCount,
-            duration_ms: durationMs,
-            attempt,
-            timestamp: new Date().toISOString()
-          }
-        };
-
-        this.idempotency.registerCompleted(requestId, responseObj);
-
-        this.observability.emitEvent('OPERATION_COMPLETED', {
+        this.observability.emitEvent('OPERATION_ATTEMPT', {
           requestId,
           sessionId,
           attempt,
-          durationMs,
           state: sessionRecord.state,
-          result: 'completed'
+          details: { isNewSession }
         });
 
-        return responseObj;
+        let sideEffectApplied = false;
 
-      } catch (err) {
-        lastError = classifyError(err);
-        sessionRecord.markInterrupted(lastError.message);
+        try {
+          const result = await this._executePromptAttempt({
+            requestId,
+            sessionId,
+            promptText,
+            timeoutMs,
+            isNewSession,
+            sessionRecord,
+            attempt,
+            onSideEffect: () => {
+              sideEffectApplied = true;
+            }
+          });
 
-        this.observability.emitEvent('OPERATION_FAILED', {
-          requestId,
-          sessionId,
-          attempt,
-          errorClassification: lastError.code,
-          details: { message: lastError.message, retryable: lastError.retryable, recoverable: lastError.recoverable }
-        });
+          // Success! Mark ready and record idempotency
+          sessionRecord.markReady(true);
+          const durationMs = Date.now() - startTime;
 
-        // Evaluate if recovery & retry is permitted
-        if (lastError.recoverable && attempt < this.maxRetryAttempts) {
-          this.observability.emitEvent('TRIGGERING_RECOVERY', {
+          const responseObj = {
+            request_id: requestId,
+            session_id: sessionId,
+            status: 'completed',
+            text: result,
+            metadata: {
+              turn: sessionRecord.turnCount,
+              duration_ms: durationMs,
+              attempt,
+              timestamp: new Date().toISOString()
+            }
+          };
+
+          this.idempotency.registerCompleted(requestId, responseObj);
+
+          this.observability.emitEvent('OPERATION_COMPLETED', {
             requestId,
             sessionId,
             attempt,
-            recoveryAction: 'attempt_auto_recover'
+            durationMs,
+            state: sessionRecord.state,
+            result: 'completed'
           });
 
-          try {
-            await this.recovery.recover(lastError.code);
-            // If recovery succeeded, continue loop for next attempt
-            continue;
-          } catch (recErr) {
-            this.observability.emitEvent('RECOVERY_FAILED_ABORT', {
+          return responseObj;
+
+        } catch (err) {
+          lastError = classifyError(err);
+          sessionRecord.markInterrupted(lastError.message);
+
+          this.observability.emitEvent('OPERATION_FAILED', {
+            requestId,
+            sessionId,
+            attempt,
+            errorClassification: lastError.code,
+            details: {
+              message: lastError.message,
+              retryable: lastError.retryable,
+              recoverable: lastError.recoverable,
+              sideEffectApplied
+            }
+          });
+
+          // BOUNDED RE-ENTRY SAFETY RULE (Phase 7.4):
+          // If prompt was already injected/applied, NEVER retry blindly to prevent duplicate execution
+          if (sideEffectApplied) {
+            this.observability.emitEvent('RETRY_SUPPRESSED_SIDE_EFFECT', {
               requestId,
               sessionId,
-              details: { message: recErr.message }
+              attempt,
+              details: { reason: 'prompt_already_injected', originalError: lastError.code }
             });
+
+            // Suppress retry: do not loop again on operation that already produced a side-effect
+            lastError.retryable = false;
             break;
           }
-        } else {
-          // Non-retryable or non-recoverable error
-          break;
+
+          // Safe Retry only when NO side-effects were applied and error is recoverable
+          if (lastError.recoverable && attempt < this.maxRetryAttempts) {
+            this.observability.emitEvent('TRIGGERING_RECOVERY', {
+              requestId,
+              sessionId,
+              attempt,
+              recoveryAction: 'attempt_auto_recover'
+            });
+
+            try {
+              await this.recovery.recover(lastError.code);
+              continue; // Safe to retry attempt
+            } catch (recErr) {
+              this.observability.emitEvent('RECOVERY_FAILED_ABORT', {
+                requestId,
+                sessionId,
+                details: { message: recErr.message }
+              });
+              break;
+            }
+          } else {
+            break;
+          }
         }
       }
+
+      // Execution failed after bounded attempts
+      sessionRecord.markFailed(lastError);
+      this.idempotency.registerFailed(requestId, lastError);
+
+      return this._formatError(
+        requestId,
+        sessionId,
+        lastError || ErrorCodes.INTERNAL_ERROR,
+        lastError ? lastError.message : 'Execution failed'
+      );
+
+    } finally {
+      // ONLY release the lock if THIS invocation was the one that acquired it (P0)
+      if (lockAcquired && this.activeRequestId === requestId) {
+        this.isProcessing = false;
+        this.activeRequestId = null;
+        this.activeSessionId = null;
+      }
     }
-
-    // Execution failed after bounded attempts
-    sessionRecord.markFailed(lastError);
-    this.idempotency.registerFailed(requestId, lastError);
-
-    return this._formatError(
-      requestId,
-      sessionId,
-      lastError ? lastError.code : ErrorCodes.INTERNAL_ERROR,
-      lastError ? lastError.message : 'Execution failed'
-    );
   }
 
-  async _executePromptAttempt({ requestId, sessionId, promptText, timeoutMs, isNewSession, attempt }) {
+  async _executePromptAttempt({ requestId, sessionId, promptText, timeoutMs, isNewSession, attempt, onSideEffect }) {
     if (this.backend) {
       try {
         const backendResult = await this.backend.send({
@@ -319,7 +371,8 @@ class ChatGptTransportAdapter extends EventEmitter {
           sessionId,
           prompt: promptText,
           timeoutMs,
-          isNewSession
+          isNewSession,
+          onSideEffect
         });
 
         if (typeof backendResult === 'string') return backendResult;
@@ -339,7 +392,7 @@ class ChatGptTransportAdapter extends EventEmitter {
       throw new TransportError(ErrorCodes.BROWSER_UNAVAILABLE, 'Driver not available on active transport');
     }
 
-    // 1. Input readiness check
+    // 1. Input readiness check (before side effect)
     if (isNewSession) {
       const inputReady = await this.driver._waitForInput(15000);
       if (!inputReady) {
@@ -350,7 +403,10 @@ class ChatGptTransportAdapter extends EventEmitter {
     // 2. Query assistant message baseline count
     const beforeCount = await this.driver.getAssistantMessageCount();
 
-    // 3. Inject and click send
+    // 3. Side-effect marker: injecting and clicking send
+    if (typeof onSideEffect === 'function') {
+      onSideEffect();
+    }
     await this.driver.injectAndSendPrompt(promptText);
 
     // 4. Deterministic completion wait
@@ -371,8 +427,18 @@ class ChatGptTransportAdapter extends EventEmitter {
     return finalText;
   }
 
-  _formatError(requestId, sessionId, code, message) {
-    const classification = (new TransportError(code, message)).toJSON();
+  _formatError(requestId, sessionId, codeOrError, message) {
+    let code = codeOrError;
+    let classification;
+
+    if (codeOrError instanceof TransportError || (codeOrError && codeOrError.name === 'TransportError')) {
+      code = codeOrError.code;
+      message = message || codeOrError.message;
+      classification = codeOrError.toJSON();
+    } else {
+      classification = (new TransportError(code, message)).toJSON();
+    }
+
     return {
       request_id: requestId,
       session_id: sessionId || null,
@@ -404,6 +470,7 @@ class ChatGptTransportAdapter extends EventEmitter {
     return {
       status: health.transport_healthy ? 'ok' : 'degraded',
       health,
+      active_request_id: this.activeRequestId,
       active_session_id: this.activeSessionId,
       is_processing: this.isProcessing,
       sessions_count: this.sessions.size,
@@ -430,17 +497,6 @@ class ChatGptTransportAdapter extends EventEmitter {
     this.idempotency.clear();
   }
 }
-
-// Ensure cleanup on send completion
-const origSend = ChatGptTransportAdapter.prototype.send;
-ChatGptTransportAdapter.prototype.send = async function(req) {
-  try {
-    return await origSend.call(this, req);
-  } finally {
-    this.isProcessing = false;
-    this.activeSessionId = null;
-  }
-};
 
 module.exports = {
   ChatGptTransportAdapter,

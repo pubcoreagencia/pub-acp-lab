@@ -1,9 +1,12 @@
 ﻿const http = require('http');
 const { ChatGptTransportAdapter, ErrorCodes } = require('./transport-adapter.js');
 
+const MAX_HTTP_BODY_BYTES = 2 * 1024 * 1024; // 2 MB limit for prompts
+
 /**
- * ChatGptTransportServer (Phase 7.3):
- * Exposes ChatGptTransportAdapter over a localhost-only HTTP JSON endpoint.
+ * ChatGptTransportServer (Phase 7.4):
+ * Exposes ChatGptTransportAdapter over a localhost-only HTTP JSON endpoint
+ * with explicit body size limit enforcement.
  *
  * Supported Endpoints:
  * - POST /v1/chat/completions (Standard RPC format)
@@ -15,6 +18,7 @@ class ChatGptTransportServer {
   constructor(options = {}) {
     this.port = options.port || 5125;
     this.host = options.host || '127.0.0.1';
+    this.maxBodyBytes = options.maxBodyBytes || MAX_HTTP_BODY_BYTES;
     this.adapter = options.adapter || new ChatGptTransportAdapter(options);
     this.server = null;
 
@@ -68,8 +72,31 @@ class ChatGptTransportServer {
 
         if (req.method === 'POST' && (url.pathname === '/v1/transport/prompt' || url.pathname === '/v1/chat/completions')) {
           let body = '';
-          req.on('data', chunk => body += chunk);
+          let receivedBytes = 0;
+          let aborted = false;
+
+          req.on('data', chunk => {
+            if (aborted) return;
+            receivedBytes += chunk.length;
+            if (receivedBytes > this.maxBodyBytes) {
+              aborted = true;
+              res.writeHead(413, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                status: 'error',
+                error: {
+                  code: ErrorCodes.PAYLOAD_TOO_LARGE,
+                  message: `Payload size exceeded limit of ${this.maxBodyBytes} bytes`
+                }
+              }));
+              req.destroy();
+              return;
+            }
+            body += chunk;
+          });
+
           req.on('end', async () => {
+            if (aborted) return;
+
             let parsed;
             try {
               parsed = JSON.parse(body || '{}');

@@ -1,13 +1,9 @@
 ﻿/**
  * Recovery Manager for ChatGpt Transport
- * Phase 7.3
+ * Phase 7.3 & Phase 7.4
  *
- * Handles deterministic recovery for:
- * - Chrome terminated / crashed
- * - Page closed or detached
- * - CDP / WebSocket disconnected
- * - Logical session detached from browser
- * - Interrupted execution reset
+ * Handles deterministic recovery via encapsulated browserManager.reconnect()
+ * without depending on low-level internals or constructing CdpClient directly.
  */
 
 const { ErrorCodes, TransportError } = require('./failure-taxonomy.js');
@@ -108,55 +104,21 @@ class RecoveryManager {
         throw new TransportError(ErrorCodes.RECOVERY_FAILED, 'BrowserManager not configured on adapter');
       }
 
-      // Step 1: Ensure browser process and CDP socket are operational
-      const health = await this.checkHealth();
-      if (!health.cdp_connected || !health.browser_healthy) {
-        this.adapter.observability.emitEvent('RECOVERY_ACTION', {
-          recoveryAction: 'relaunch_and_reconnect',
-          details: { priorHealth: health }
-        });
+      // Step 1: Delegate browser and CDP restoration to encapsulated bm.reconnect()
+      this.adapter.observability.emitEvent('RECOVERY_ACTION', {
+        recoveryAction: 'delegating_to_browser_manager_reconnect',
+        details: { cause }
+      });
 
-        // Close old CDP if dangling
-        if (bm.cdp) {
-          bm.cdp.close();
-        }
+      await bm.reconnect();
+      record.actions.push('browser_manager_reconnected');
 
-        // Re-launch / re-attach browser
-        await bm.launch();
-        record.actions.push('cdp_reconnected');
+      // Step 2: Re-instantiate driver using the newly restored CDP client
+      const { ChatGptDriver } = require('../isolated-browser/chatgpt-driver.js');
+      this.adapter.driver = new ChatGptDriver(bm.cdp);
+      record.actions.push('driver_reinstantiated');
 
-        // Step 2: Ensure target is on ChatGPT page
-        const targets = await bm._getTargets();
-        let pageTarget = targets.find(t => t.type === 'page' && t.url.includes('chatgpt.com'));
-        if (!pageTarget) {
-          pageTarget = targets.find(t => t.type === 'page');
-        }
-
-        if (!pageTarget) {
-          throw new TransportError(ErrorCodes.RECOVERY_FAILED, 'No available page target found after relaunch');
-        }
-
-        bm.pageTarget = pageTarget;
-        if (!pageTarget.url.includes('chatgpt.com')) {
-          await bm.navigate('https://chatgpt.com');
-          record.actions.push('navigated_to_chatgpt');
-        }
-
-        // Reconnect CDP client to page target
-        const { CdpClient } = require('../isolated-browser/cdp-client.js');
-        bm.cdp = new CdpClient(pageTarget.webSocketDebuggerUrl);
-        await bm.cdp.connect();
-        await bm.cdp.send('Runtime.enable');
-        await bm.cdp.send('Page.enable');
-        record.actions.push('cdp_page_domains_enabled');
-
-        // Re-instantiate driver with new CDP client
-        const { ChatGptDriver } = require('../isolated-browser/chatgpt-driver.js');
-        this.adapter.driver = new ChatGptDriver(bm.cdp);
-        record.actions.push('driver_reinstantiated');
-      }
-
-      // Step 3: Check and reset input state
+      // Step 3: Check and verify input state
       if (this.adapter.driver) {
         try {
           await this.adapter.driver._waitForInput(5000);

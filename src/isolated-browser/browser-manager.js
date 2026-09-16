@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+﻿const { spawn } = require('child_process');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
@@ -14,7 +14,7 @@ class IsolatedBrowserManager {
     this.pageTarget = null;
   }
 
-    async launch() {
+  async launch() {
     // Check if Chrome is already running on the port
     let alreadyRunning = false;
     try {
@@ -65,6 +65,46 @@ class IsolatedBrowserManager {
       port: this.port,
       profileDir: this.profileDir,
       targetId: pageTarget.id
+    };
+  }
+
+  /**
+   * Encapsulated reconnection and target re-attachment (Phase 7.4).
+   * Restores CDP socket, page targets and domains cleanly without exposing internals.
+   */
+  async reconnect() {
+    if (this.cdp) {
+      try { this.cdp.close(); } catch {}
+      this.cdp = null;
+    }
+
+    // Ensure browser process is listening
+    await this.launch();
+
+    const targets = await this._getTargets();
+    let pageTarget = targets.find(t => t.type === 'page' && t.url && t.url.includes('chatgpt.com'));
+    if (!pageTarget) {
+      pageTarget = targets.find(t => t.type === 'page');
+    }
+
+    if (!pageTarget) {
+      throw new Error('No valid page target found during browser reconnection');
+    }
+
+    this.pageTarget = pageTarget;
+    if (!pageTarget.url.includes('chatgpt.com')) {
+      await this.navigate('https://chatgpt.com');
+    }
+
+    this.cdp = new CdpClient(pageTarget.webSocketDebuggerUrl);
+    await this.cdp.connect();
+    await this.cdp.send('Runtime.enable');
+    await this.cdp.send('Page.enable');
+
+    return {
+      port: this.port,
+      targetId: pageTarget.id,
+      url: pageTarget.url
     };
   }
 

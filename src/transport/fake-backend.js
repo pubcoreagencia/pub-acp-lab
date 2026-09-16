@@ -1,14 +1,15 @@
-/**
+﻿/**
  * FakeChatGptBackend:
  * Simulates ChatGPT behavior purely in-memory for fast, deterministic contract tests.
  * Zero Chrome, zero CDP, zero DOM, zero network dependency.
+ * Supports onSideEffect notification callback for bounded re-entry testing (Phase 7.4).
  */
 class FakeChatGptBackend {
   constructor() {
     this.sessionStores = new Map();
   }
 
-  async send({ requestId, sessionId, prompt, timeoutMs, isNewSession }) {
+  async send({ requestId, sessionId, prompt, timeoutMs, isNewSession, onSideEffect }) {
     if (!this.sessionStores.has(sessionId)) {
       this.sessionStores.set(sessionId, {
         history: [],
@@ -17,6 +18,18 @@ class FakeChatGptBackend {
     }
 
     const store = this.sessionStores.get(sessionId);
+
+    // If test requested timeout BEFORE side effect
+    if (prompt === 'SIMULATE_TIMEOUT_BEFORE_SIDEEFFECT') {
+      await new Promise(r => setTimeout(r, 60));
+      throw new Error(`Timeout waiting for response (${timeoutMs}ms)`);
+    }
+
+    // Mark side effect applied (prompt received & processed)
+    if (typeof onSideEffect === 'function') {
+      onSideEffect();
+    }
+
     store.history.push(prompt);
 
     // Timeout simulation: if timeoutMs is ultra-short (< 500ms) or prompt asks to hang

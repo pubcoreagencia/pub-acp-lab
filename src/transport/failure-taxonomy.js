@@ -1,6 +1,6 @@
 ﻿/**
  * Failure Taxonomy & Error Classification for ChatGpt Transport
- * Phase 7.3
+ * Phase 7.3 & Phase 7.4
  */
 
 const ErrorCategory = {
@@ -23,7 +23,11 @@ const ErrorCodes = {
   CDP_DISCONNECTED: 'CDP_DISCONNECTED',
   BROWSER_CRASHED: 'BROWSER_CRASHED',
   RECOVERY_FAILED: 'RECOVERY_FAILED',
-  REQUEST_IN_FLIGHT: 'REQUEST_IN_FLIGHT'
+  REQUEST_IN_FLIGHT: 'REQUEST_IN_FLIGHT',
+  // Phase 7.4 Additions
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
+  PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
+  OPERATION_UNCERTAIN: 'OPERATION_UNCERTAIN'
 };
 
 const CodeClassification = {
@@ -41,6 +45,21 @@ const CodeClassification = {
     category: ErrorCategory.CLIENT,
     retryable: false,
     recoverable: false
+  },
+  [ErrorCodes.IDEMPOTENCY_CONFLICT]: {
+    category: ErrorCategory.CLIENT,
+    retryable: false,
+    recoverable: false
+  },
+  [ErrorCodes.PAYLOAD_TOO_LARGE]: {
+    category: ErrorCategory.CLIENT,
+    retryable: false,
+    recoverable: false
+  },
+  [ErrorCodes.OPERATION_UNCERTAIN]: {
+    category: ErrorCategory.TRANSIENT,
+    retryable: false, // Não fazer retry cego de operação já injetada
+    recoverable: true
   },
   [ErrorCodes.SESSION_BUSY]: {
     category: ErrorCategory.TRANSIENT,

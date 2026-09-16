@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Failure Injection & Reliability Test Suite for Phase 7.3
  *
  * Provokes deterministic failures:
@@ -92,15 +92,24 @@ async function runFailureInjectionTests() {
     if (res2A.status !== 'completed') throw new Error('Initial request failed');
     console.log('  -> Initial response received:', res2A.text);
 
-    console.log('  -> Re-sending same request_id to verify deduplication / cached return...');
+    console.log('  -> Re-sending same request_id and same prompt to verify deduplication / cached return...');
     const res2B = await client.send({
       request_id: fixedReqId,
-      prompt: 'Different prompt attempting overwrite with same request_id'
+      prompt: 'Responda exatamente: IDEMPOTENCY_VERIFIED'
     });
     if (res2B.status !== 'completed' || res2B.text !== 'IDEMPOTENCY_VERIFIED') {
       throw new Error(`Idempotency violated! Expected cached response, got: ${JSON.stringify(res2B)}`);
     }
-    console.log('[TEST 2 PASS] Idempotent request protected against duplicate execution!\n');
+
+    console.log('  -> Sending conflicting prompt with same request_id...');
+    const res2C = await client.send({
+      request_id: fixedReqId,
+      prompt: 'Different prompt attempting overwrite with same request_id'
+    });
+    if (res2C.status !== 'error' || res2C.error.code !== ErrorCodes.IDEMPOTENCY_CONFLICT) {
+      throw new Error(`Expected IDEMPOTENCY_CONFLICT, got: ${JSON.stringify(res2C)}`);
+    }
+    console.log('[TEST 2 PASS] Idempotent request protected with cache and conflict detection!\n');
 
     // -------------------------------------------------------------
     // TEST 3: BOUNDED RETRY ON TRANSIENT / RECOVERABLE FAILURE
