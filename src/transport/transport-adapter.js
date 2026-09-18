@@ -20,7 +20,7 @@ class ChatGptTransportAdapter extends EventEmitter {
     super();
     this.port = options.port || 9555;
     this.profileDir = options.profileDir || path.resolve(process.cwd(), 'isolated_profile');
-    this.chromePath = options.chromePath || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    this.chromePath = options.chromePath || null;
     this.defaultTimeoutMs = options.defaultTimeoutMs || TimeoutPolicy.DEFAULT_TIMEOUT_MS;
     this.backend = options.backend || null;
     this.browserManager = options.browserManager || null;
