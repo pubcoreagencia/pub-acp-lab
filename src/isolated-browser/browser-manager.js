@@ -4,11 +4,32 @@ const path = require('path');
 const fs = require('fs');
 const { CdpClient } = require('./cdp-client.js');
 
+function resolveChromePath(explicitPath) {
+  if (explicitPath) return explicitPath;
+  const candidates = process.platform === 'darwin'
+    ? [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
+      ]
+    : process.platform === 'win32'
+      ? [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+        ]
+      : [
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable',
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser'
+        ];
+  return candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+}
+
 class IsolatedBrowserManager {
   constructor(options = {}) {
     this.port = options.port || 9555;
     this.profileDir = options.profileDir || path.resolve(process.cwd(), 'isolated_profile');
-    this.chromePath = options.chromePath || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    this.chromePath = resolveChromePath(options.chromePath);
     this.proc = null;
     this.cdp = null;
     this.pageTarget = null;
@@ -27,6 +48,9 @@ class IsolatedBrowserManager {
     if (!alreadyRunning) {
       if (!fs.existsSync(this.profileDir)) {
         fs.mkdirSync(this.profileDir, { recursive: true });
+      }
+      if (!fs.existsSync(this.chromePath)) {
+        throw new Error(`Chrome executable not found for platform ${process.platform}: ${this.chromePath}. Set CHROME_PATH or pass chromePath explicitly.`);
       }
 
       this.proc = spawn(this.chromePath, [
@@ -51,6 +75,9 @@ class IsolatedBrowserManager {
     let pageTarget = targets.find(t => t.type === 'page');
     if (!pageTarget) {
       pageTarget = targets[0];
+    }
+    if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
+      throw new Error('No Chrome CDP page target available');
     }
     this.pageTarget = pageTarget;
 
@@ -237,4 +264,4 @@ class IsolatedBrowserManager {
   }
 }
 
-module.exports = { IsolatedBrowserManager };
+module.exports = { IsolatedBrowserManager, resolveChromePath };
